@@ -1,75 +1,76 @@
 
 import re
+from uuid import uuid4
+
+
+def get_field(report, field):
+    pattern = rf"(?im)^\s*{re.escape(field)}\s*:\s*(.+?)\s*$"
+    match = re.search(pattern, report)
+
+    if match:
+        return match.group(1).strip()
+
+    return None
 
 
 def parse_case(report_text):
     report = report_text.strip()
 
-    # Extract a reported time, if one is explicitly mentioned.
-    time_match = re.search(
-        r"\b(?:around|at|approximately)\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b",
-        report,
-        re.IGNORECASE
-    )
+    report_type = get_field(report, "Type")
+    age_text = get_field(report, "Age")
+    clothing = get_field(report, "Clothing")
+    location = get_field(report, "Location")
+    reported_time = get_field(report, "Time")
+    description = get_field(report, "Description")
+    source = get_field(report, "Reporter")
 
-    reported_time = time_match.group(0) if time_match else None
+    if report_type:
+        report_type = report_type.lower().strip()
 
-    # Extract a location using simple location phrases.
-    location_match = re.search(
-        r"\b(?:near|at)\s+(.+?)(?=\s+\b(?:around|at)\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b|[,.]|$)",
-        report,
-        re.IGNORECASE
-    )
+    if report_type not in ("missing", "found"):
+        report_type = None
 
-    reported_location = location_match.group(1).strip() if location_match else None
+    age = None
 
-    # Extract the reporter, if the report mentions one.
-    source_match = re.search(
-        r"\breporter\s+is\s+(.+?)(?:[,.]|$)",
-        report,
-        re.IGNORECASE
-    )
-
-    source = source_match.group(1).strip() if source_match else None
-
-    # Keep the original report as the description.
-    description = report if report else None
-
-    # Only flag a concern when the report explicitly mentions it.
-    if re.search(r"\balone\b", report, re.IGNORECASE):
-        immediate_concern = "Reported alone; requires human assessment"
-    else:
-        immediate_concern = None
-
-    # This demo does not identify children.
-    # Age is unknown unless an age is explicitly mentioned.
-    age_match = re.search(
-        r"\b(\d{1,2})\s*(?:years?\s*old|year-old)\b",
-        report,
-        re.IGNORECASE
-    )
+    if age_text:
+        age_match = re.search(r"\d{1,2}", age_text)
+        if age_match:
+            age = int(age_match.group())
 
     unknown_fields = []
 
-    if not age_match:
+    if age is None:
         unknown_fields.append("age")
 
-    # Identity is not inferred or matched by this tool.
+    if not clothing:
+        unknown_fields.append("clothing")
+
+    # Identity is never inferred or confirmed.
     unknown_fields.append("identity")
 
     return {
-        "case_id": "DEMO-001",
-        "reported_location": reported_location,
-        "reported_time": reported_time,
+        "case_id": "DEMO-" + uuid4().hex[:8].upper(),
+        "report_type": report_type,
+        "age": age,
+        "clothing": clothing,
+        "location": location,
+        "time": reported_time,
         "description": description,
-        "immediate_concern": immediate_concern,
         "source": source,
+        "reported_location": location,
+        "reported_time": reported_time,
+        "immediate_concern": (
+            "Reported alone; requires human assessment"
+            if re.search(r"\balone\b", report, re.IGNORECASE)
+            else None
+        ),
         "unknown_fields": unknown_fields
     }
 
 
 def find_missing_fields(case_data):
     required_fields = [
+        "report_type",
         "reported_location",
         "reported_time",
         "description",
@@ -81,14 +82,13 @@ def find_missing_fields(case_data):
     for field in required_fields:
         value = case_data.get(field)
 
-        if not value or not str(value).strip():
+        if value is None or not str(value).strip():
             missing_fields.append(field)
 
     return missing_fields
 
 
 def create_draft_referral(case_data, guidance_result, missing_fields):
-    # Show only the guidance actually returned by P3.
     if isinstance(guidance_result, dict):
         guidance_text = guidance_result.get("passage")
         guidance_source = guidance_result.get("source_title")
@@ -105,10 +105,13 @@ def create_draft_referral(case_data, guidance_result, missing_fields):
     else:
         missing_text = "No required fields are missing."
 
-    draft = {
+    return {
         "status": "DRAFT — NOT SENT",
-        "case_id": case_data.get("case_id", "DEMO-001"),
+        "case_id": case_data.get("case_id"),
+        "report_type": case_data.get("report_type"),
         "reported_facts": {
+            "age": case_data.get("age"),
+            "clothing": case_data.get("clothing"),
             "location": case_data.get("reported_location"),
             "time": case_data.get("reported_time"),
             "description": case_data.get("description"),
@@ -121,5 +124,3 @@ def create_draft_referral(case_data, guidance_result, missing_fields):
         "guidance_source": guidance_source,
         "next_step": "Human review is required before any referral."
     }
-
-    return draft

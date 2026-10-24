@@ -1,4 +1,11 @@
 
+import asyncio
+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 import os
 import json
 from datetime import datetime, timezone
@@ -15,20 +22,28 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-from matching import find_candidates
+from matching import (
+    find_candidates,
+    compare_reports,
+    find_potential_matches,
+)
 from reports import MISSING_REPORTS
-
+from tools import (
+    parse_case,
+    find_missing_fields,
+    create_draft_referral,
+)
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.environ["ASI1_API_KEY"],
-    base_url="https://api.asi1.ai/v1",
-)
+seed = os.getenv("AGENT_SEED")
+
+if not seed:
+    raise RuntimeError("AGENT_SEED is missing from .env")
 
 agent = Agent(
-    name="ChildSafe AI",
-    seed=os.environ["AGENT_SEED"],
+    name="childsafe-ai",
+    seed=seed,
     port=8001,
     mailbox=True,
     publish_agent_details=True,
@@ -36,8 +51,20 @@ agent = Agent(
 
 protocol = Protocol(spec=chat_protocol_spec)
 
+STORE_FILE = "demo_cases.json"
+
 
 def ask_asi1(message):
+    api_key = os.getenv("ASI1_API_KEY")
+
+    if not api_key:
+        return "ASI1_API_KEY is missing from .env."
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.asi1.ai/v1",
+    )
+
     response = client.chat.completions.create(
         model="asi1",
         messages=[
@@ -164,37 +191,160 @@ def process_match(raw_data):
     return "\n".join(lines)
 
 
+def load_cases():
+    if not os.path.exists(STORE_FILE):
+        return []
+
+    try:
+        with open(STORE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        return data if isinstance(data, list) else []
+
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_cases(cases):
+    with open(STORE_FILE, "w", encoding="utf-8") as file:
+        json.dump(cases, file, indent=2, ensure_ascii=False)
+
+
+def get_matches(case_data, saved_cases):
+    if case_data.get("report_type") == "missing":
+        return find_potential_matches(
+            case_data,
+            saved_cases,
+            minimum_score=35,
+        )
+
+    matches = []
+
+    if case_data.get("report_type") != "found":
+        return matches
+
+    for old_case in saved_cases:
+        if old_case.get("report_type") != "missing":
+            continue
+
+        result = compare_reports(old_case, case_data)
+
+        if (
+            len(result["comparable_fields"]) >= 2
+            and result["score"] >= 35
+        ):
+            matches.append(result)
+
+    matches.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    return matches
+
+
+def process_report(report_text):
+    if not report_text.strip():
+        return (
+            "Please provide a fictional demo report and specify "
+            "'Type: missing' or 'Type: found'."
+        )
+
+    try:
+        case_data = parse_case(report_text)
+
+        if not case_data.get("report_type"):
+            return (
+                "Please specify the report type as either "
+                "'Type: missing' or 'Type: found'.\n\n"
+                "Use fictional demo details only."
+            )
+
+        if case_data["report_type"] not in ("missing", "found"):
+            return (
+                "Invalid report type. Use 'Type: missing' "
+                "or 'Type: found'."
+            )
+
+        missing_fields = find_missing_fields(case_data)
+
+        guidance_result = {
+            "passage": None,
+            "source_title": "Unavailable — demo guidance not connected",
+            "source_url": None,
+        }
+
+        draft = create_draft_referral(
+            case_data,
+            guidance_result,
+            missing_fields,
+        )
+
+        saved_cases = load_cases()
+        matches = get_matches(case_data, saved_cases)
+
+        saved_cases.append(case_data)
+        save_cases(saved_cases)
+
+        result = {
+            "draft": draft,
+            "potential_matches": matches,
+            "reports_in_demo_store": len(saved_cases),
+            "safety_note": (
+                "Fictional demo only. A score is not proof of identity. "
+                "Human verification is required. No referral has been sent."
+            ),
+        }
+
+        return (
+            "CHILDSAFE AI — DEMO RESULT\n\n"
+            + json.dumps(result, indent=2, ensure_ascii=False)
+        )
+
+    except Exception:
+        raise
+
 
 def process_message(message):
-    print("ORIGINAL MESSAGE:", repr(message))
-
     cleaned_message = message.strip()
 
-    # Agentverse may prepend the recipient's agent address.
-    # Remove that prefix before checking the command.
-    if cleaned_message.startswith("@") and " " in cleaned_message:
+    if (
+        cleaned_message.startswith("@")
+        and " " in cleaned_message
+    ):
         first_part, remaining = cleaned_message.split(maxsplit=1)
 
         if first_part.startswith("@agent"):
             cleaned_message = remaining.strip()
 
-    print("MESSAGE AFTER PREFIX REMOVAL:", repr(cleaned_message))
+    if not cleaned_message:
+        return "Please send a message or a fictional demo report."
 
-    # Route /match requests to the matching engine.
-    first_word = (
-        cleaned_message.split(maxsplit=1)[0].casefold()
-        if cleaned_message
-        else ""
-    )
+    first_word = cleaned_message.split(maxsplit=1)[0].casefold()
 
     if first_word == "/match":
-        print("ROUTING TO MATCHING ENGINE")
         raw_data = cleaned_message[len("/match"):].strip()
         return process_match(raw_data)
 
-    print("ROUTING TO ASI:One")
-    return ask_asi1(cleaned_message)
+    if first_word == "/report":
+        report_text = cleaned_message[len("/report"):].strip()
+        return process_report(report_text)
 
+    lowered_message = cleaned_message.casefold()
+
+    report_indicators = (
+        "type: missing",
+        "type: found",
+        "last seen:",
+        "missing child",
+        "found child",
+        "report type:",
+    )
+
+    if any(indicator in lowered_message for indicator in report_indicators):
+        return process_report(cleaned_message)
+
+    return ask_asi1(cleaned_message)
 
 
 @protocol.on_message(ChatMessage)
@@ -213,26 +363,15 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         if isinstance(item, TextContent)
     ).strip()
 
-    ctx.logger.info(f"Incoming chat message: {message[:150]}")
+    ctx.logger.info("Incoming chat message: %s", message[:150])
 
     try:
-        ctx.logger.info("ROUTING TEST: calling process_message")
-
-        if message:
-            answer = process_message(message)
-        else:
-            answer = (
-                "Please send a message or a fictional case report."
-            )
-
-        print("FINAL ANSWER BEING SENT TO AGENTVERSE:")
-        print(answer)
-
+        answer = process_message(message)
     except Exception:
         ctx.logger.exception("Message processing failed")
         answer = (
-            "I could not process that request. "
-            "Please check the local agent logs and try again."
+            "The request could not be processed. "
+            "Check the agent logs and try again with fictional demo details."
         )
 
     await ctx.send(
@@ -254,7 +393,7 @@ async def handle_ack(
     sender: str,
     msg: ChatAcknowledgement,
 ):
-    pass
+    ctx.logger.info("Received acknowledgement from %s", sender)
 
 
 agent.include(protocol, publish_manifest=True)
