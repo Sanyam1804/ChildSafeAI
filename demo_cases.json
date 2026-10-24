@@ -1,0 +1,16 @@
+[
+  {
+    "case_id": "DEMO-001",
+    "report_type": "found",
+    "age": 7,
+    "clothing": "blue shirt",
+    "location": "Example railway station, platform 2",
+    "time": "around 10 AM",
+    "description": "FICTIONAL DEMO ONLY: A child is reported alone near platform 2.",
+    "source": "fictional demo reporter",
+    "reported_location": "Example railway station, platform 2",
+    "reported_time": "around 10 AM",
+    "immediate_concern": "Requires assessment by a trained human",
+    "unknown_fields": ["identity"]
+  }
+]
