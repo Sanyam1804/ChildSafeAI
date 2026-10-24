@@ -42,3 +42,31 @@ Coordinate with the report-processing owner (P2) to agree on a safe, consistent 
 - [ ] Agree on expected case-ID behaviour with P2 and the workflow owner.
 - [ ] Verify distinct cases can be tracked consistently.
 - [ ] Verify retries do not create unintended duplicate records.
+
+## BUG-002: `parse_case()` Crashes on `None` Input
+
+**Status:** Open — investigation required  
+**Severity:** Medium  
+**Area:** Report Processing / Input Validation  
+**File:** `tools.py`  
+**Function:** `parse_case()`
+
+### Observation
+Passing `None` instead of report text causes an exception.
+
+### Reproduction
+```bash
+python3 -c "from tools import parse_case; print(parse_case(None))"
+```
+
+### Actual Behaviour
+The function raises `AttributeError` at `report_text.strip()` because `None` does not provide a `strip()` method.
+
+### Expected Behaviour
+Invalid input should be handled predictably without an unhandled exception. The expected return value or error-handling strategy needs agreement with P2.
+
+### Potential Impact
+Unexpected input may interrupt the workflow before report processing completes.
+
+### Recommended Next Step
+Coordinate with P2 to agree on input validation and error-handling behaviour before changing the implementation.
